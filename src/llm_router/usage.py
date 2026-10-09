@@ -36,6 +36,10 @@ class UsageRecord:
     cached_tokens: int = 0
     cost_usd: float | None = None
     error: str | None = None
+    #: Client name from the config; ``None`` for admin keys or when auth is off.
+    client: str | None = None
+    #: ``chat`` or ``embeddings``.
+    endpoint: str = "chat"
 
 
 _SCHEMA = """
@@ -58,7 +62,22 @@ CREATE TABLE IF NOT EXISTS requests (
 CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests (ts);
 """
 
+#: Columns added after 0.1.0; existing databases are upgraded in place.
+_MIGRATIONS = {
+    "client": "ALTER TABLE requests ADD COLUMN client TEXT",
+    "endpoint": "ALTER TABLE requests ADD COLUMN endpoint TEXT NOT NULL DEFAULT 'chat'",
+}
+
 _COLUMNS = list(UsageRecord.__dataclass_fields__)
+
+_TOTALS = """
+    COUNT(*) AS requests,
+    COALESCE(SUM(1 - ok), 0) AS failures,
+    COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+    COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+    COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
+    COALESCE(SUM(cost_usd), 0) AS cost_usd
+"""
 
 
 class UsageStore:
@@ -68,6 +87,12 @@ class UsageStore:
         self._db = sqlite3.connect(path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.executescript(_SCHEMA)
+        existing = {row["name"] for row in self._db.execute("PRAGMA table_info(requests)")}
+        for column, statement in _MIGRATIONS.items():
+            if column not in existing:
+                self._db.execute(statement)
+        self._db.execute("CREATE INDEX IF NOT EXISTS idx_requests_client_ts ON requests (client, ts)")
+        self._db.commit()
         self._lock = threading.Lock()
 
     def record(self, record: UsageRecord) -> None:
@@ -80,49 +105,61 @@ class UsageStore:
             )
             self._db.commit()
 
-    def summary(self, since_ts: float) -> dict:
+    def cost_since(self, client: str, since_ts: float) -> float:
+        """Total recorded cost for ``client`` since ``since_ts`` (used for monthly budgets)."""
         with self._lock:
-            totals = self._db.execute(
-                """
-                SELECT COUNT(*) AS requests,
-                       COALESCE(SUM(1 - ok), 0) AS failures,
-                       COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
-                       COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
-                       COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
-                       COALESCE(SUM(cost_usd), 0) AS cost_usd
-                FROM requests WHERE ts >= ?
-                """,
-                (since_ts,),
+            row = self._db.execute(
+                "SELECT COALESCE(SUM(cost_usd), 0) FROM requests WHERE client = ? AND ts >= ?",
+                (client, since_ts),
             ).fetchone()
+        return float(row[0])
+
+    def summary(self, since_ts: float, client: str | None = None) -> dict:
+        """Totals plus breakdowns by model and by client. ``client`` restricts everything to one client."""
+        where, params = "ts >= ?", [since_ts]
+        if client is not None:
+            where += " AND client = ?"
+            params.append(client)
+        with self._lock:
+            totals = self._db.execute(f"SELECT {_TOTALS} FROM requests WHERE {where}", params).fetchone()
             by_model = self._db.execute(
-                """
-                SELECT provider, model,
-                       COUNT(*) AS requests,
-                       SUM(1 - ok) AS failures,
-                       SUM(prompt_tokens) AS prompt_tokens,
-                       SUM(completion_tokens) AS completion_tokens,
-                       SUM(cached_tokens) AS cached_tokens,
-                       COALESCE(SUM(cost_usd), 0) AS cost_usd,
-                       CAST(AVG(latency_ms) AS INTEGER) AS avg_latency_ms
-                FROM requests WHERE ts >= ? AND provider IS NOT NULL
+                f"""
+                SELECT provider, model, {_TOTALS}, CAST(AVG(latency_ms) AS INTEGER) AS avg_latency_ms
+                FROM requests WHERE {where} AND provider IS NOT NULL
                 GROUP BY provider, model ORDER BY requests DESC
                 """,
-                (since_ts,),
+                params,
             ).fetchall()
-        result = dict(totals)
-        result["cost_usd"] = round(result["cost_usd"], 6)
-        result["by_model"] = [dict(row) for row in by_model]
-        for row in result["by_model"]:
-            row["cost_usd"] = round(row["cost_usd"], 6)
+            by_client = self._db.execute(
+                f"""
+                SELECT COALESCE(client, 'admin') AS client, {_TOTALS}
+                FROM requests WHERE {where}
+                GROUP BY COALESCE(client, 'admin') ORDER BY cost_usd DESC, requests DESC
+                """,
+                params,
+            ).fetchall()
+        result = _rounded(dict(totals))
+        result["by_model"] = [_rounded(dict(row)) for row in by_model]
+        result["by_client"] = [_rounded(dict(row)) for row in by_client]
         return result
 
-    def recent(self, limit: int = 20) -> list[dict]:
+    def recent(self, limit: int = 20, client: str | None = None) -> list[dict]:
+        query = f"SELECT {', '.join(_COLUMNS)} FROM requests"
+        params: list = []
+        if client is not None:
+            query += " WHERE client = ?"
+            params.append(client)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
         with self._lock:
-            rows = self._db.execute(
-                f"SELECT {', '.join(_COLUMNS)} FROM requests ORDER BY id DESC LIMIT ?", (limit,)
-            ).fetchall()
+            rows = self._db.execute(query, params).fetchall()
         return [{**dict(r), "ok": bool(r["ok"]), "stream": bool(r["stream"])} for r in rows]
 
     def close(self) -> None:
         with self._lock:
             self._db.close()
+
+
+def _rounded(row: dict) -> dict:
+    row["cost_usd"] = round(row["cost_usd"], 6)
+    return row

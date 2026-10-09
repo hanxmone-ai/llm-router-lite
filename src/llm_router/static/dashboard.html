@@ -97,6 +97,15 @@
     </section>
   </div>
 
+  <section id="clients-section">
+    <h2>By client</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Client</th><th class="num">Requests</th><th class="num">Failed</th>
+        <th class="num">Prompt</th><th class="num">Completion</th><th class="num">Cost (USD)</th></tr></thead>
+      <tbody id="by-client"></tbody>
+    </table></div>
+  </section>
+
   <section>
     <h2>By model</h2>
     <div class="scroll"><table>
@@ -110,7 +119,7 @@
   <section>
     <h2>Recent requests</h2>
     <div class="scroll"><table>
-      <thead><tr><th>Time</th><th>Route</th><th>Served by</th><th>Result</th><th class="num">Attempts</th>
+      <thead><tr><th>Time</th><th>Client</th><th>Route</th><th>Served by</th><th>Result</th><th class="num">Attempts</th>
         <th class="num">Tokens in / out</th><th class="num">Latency</th></tr></thead>
       <tbody id="recent"></tbody>
     </table></div>
@@ -145,14 +154,52 @@
   let routesLoaded = false;
   async function refresh() {
     try {
-      const [status, usage] = await Promise.all([api('/v1/status'), api('/v1/usage?hours=' + $('hours').value)]);
+      const usage = await api('/v1/usage?hours=' + $('hours').value);
+      // /v1/status needs an admin key; with a client key the routes panel shows a note instead.
+      const status = await api('/v1/status').catch(() => null);
       $('error').textContent = '';
       $('c-requests').textContent = fmt.format(usage.requests);
       $('c-failures').textContent = fmt.format(usage.failures);
       $('c-prompt').textContent = fmt.format(usage.prompt_tokens) + ' (' + fmt.format(usage.cached_tokens) + ')';
       $('c-completion').textContent = fmt.format(usage.completion_tokens);
-      $('c-cost').textContent = '$' + usage.cost_usd.toFixed(4);
+      $('c-cost').textContent = '$' + usage.cost_usd.toFixed(4) +
+        (usage.budget ? ' / $' + usage.budget.monthly_usd + ' mo' : '');
 
+      if (!routesLoaded) {
+        const models = await api('/v1/models');
+        const names = models.data.map((m) => m.id).filter((n) => n !== 'embed');
+        $('route').innerHTML = names.map((r) => '<option>' + esc(r) + '</option>').join('');
+        if (names.includes('demo')) $('route').value = 'demo';
+        routesLoaded = true;
+      }
+
+      $('by-client').innerHTML = usage.by_client.map((r) =>
+        '<tr><td class="mono">' + esc(r.client) + '</td><td class="num">' + fmt.format(r.requests) +
+        '</td><td class="num">' + fmt.format(r.failures) + '</td><td class="num">' + fmt.format(r.prompt_tokens) +
+        '</td><td class="num">' + fmt.format(r.completion_tokens) + '</td><td class="num">' + r.cost_usd.toFixed(4) + '</td></tr>'
+      ).join('') || '<tr><td colspan="6" class="muted">No requests yet</td></tr>';
+
+      $('by-model').innerHTML = usage.by_model.map((r) =>
+        '<tr><td class="mono">' + esc(r.provider + '/' + r.model) + '</td><td class="num">' + fmt.format(r.requests) +
+        '</td><td class="num">' + fmt.format(r.failures) + '</td><td class="num">' + fmt.format(r.prompt_tokens) +
+        '</td><td class="num">' + fmt.format(r.cached_tokens) + '</td><td class="num">' + fmt.format(r.completion_tokens) +
+        '</td><td class="num">' + fmt.format(r.avg_latency_ms) + ' ms</td><td class="num">' + r.cost_usd.toFixed(4) + '</td></tr>'
+      ).join('') || '<tr><td colspan="8" class="muted">No requests yet</td></tr>';
+
+      $('recent').innerHTML = usage.recent.map((r) =>
+        '<tr><td>' + new Date(r.ts * 1000).toLocaleTimeString() + '</td><td class="mono">' + esc(r.client || 'admin') +
+        '</td><td class="mono">' + esc(r.route) + (r.endpoint === 'embeddings' && !/embed/.test(r.route) ? ' <span class="muted">embeddings</span>' : '') +
+        '</td><td class="mono">' + esc(r.provider ? r.provider + '/' + r.model : '—') +
+        '</td><td>' + (r.ok ? '<span class="ok">ok</span>' : '<span class="bad" title="' + esc(r.error) + '">failed</span>') +
+        (r.stream ? ' <span class="muted">stream</span>' : '') +
+        '</td><td class="num">' + r.attempts + '</td><td class="num">' + fmt.format(r.prompt_tokens) + ' / ' +
+        fmt.format(r.completion_tokens) + '</td><td class="num">' + fmt.format(r.latency_ms) + ' ms</td></tr>'
+      ).join('') || '<tr><td colspan="8" class="muted">No requests yet</td></tr>';
+
+      if (!status) {
+        $('routes').innerHTML = '<span class="muted">Route health is visible with an admin key.</span>';
+        return;
+      }
       $('routes').innerHTML = Object.entries(status.routes).map(([name, targets]) => {
         const chain = targets.map((t) => {
           const provider = status.providers[t.target.split('/')[0]] || {};
@@ -163,28 +210,6 @@
         }).join('<span class="arrow">→</span>');
         return '<div class="route"><b>' + esc(name) + '</b><div class="targets">' + chain + '</div></div>';
       }).join('');
-
-      if (!routesLoaded) {
-        $('route').innerHTML = Object.keys(status.routes).map((r) => '<option>' + esc(r) + '</option>').join('');
-        if (status.routes.demo) $('route').value = 'demo';
-        routesLoaded = true;
-      }
-
-      $('by-model').innerHTML = usage.by_model.map((r) =>
-        '<tr><td class="mono">' + esc(r.provider + '/' + r.model) + '</td><td class="num">' + fmt.format(r.requests) +
-        '</td><td class="num">' + fmt.format(r.failures) + '</td><td class="num">' + fmt.format(r.prompt_tokens) +
-        '</td><td class="num">' + fmt.format(r.cached_tokens) + '</td><td class="num">' + fmt.format(r.completion_tokens) +
-        '</td><td class="num">' + fmt.format(r.avg_latency_ms) + ' ms</td><td class="num">' + r.cost_usd.toFixed(4) + '</td></tr>'
-      ).join('') || '<tr><td colspan="8" class="muted">No requests yet</td></tr>';
-
-      $('recent').innerHTML = usage.recent.map((r) =>
-        '<tr><td>' + new Date(r.ts * 1000).toLocaleTimeString() + '</td><td class="mono">' + esc(r.route) +
-        '</td><td class="mono">' + esc(r.provider ? r.provider + '/' + r.model : '—') +
-        '</td><td>' + (r.ok ? '<span class="ok">ok</span>' : '<span class="bad" title="' + esc(r.error) + '">failed</span>') +
-        (r.stream ? ' <span class="muted">stream</span>' : '') +
-        '</td><td class="num">' + r.attempts + '</td><td class="num">' + fmt.format(r.prompt_tokens) + ' / ' +
-        fmt.format(r.completion_tokens) + '</td><td class="num">' + fmt.format(r.latency_ms) + ' ms</td></tr>'
-      ).join('') || '<tr><td colspan="7" class="muted">No requests yet</td></tr>';
     } catch (e) {
       $('error').textContent = e.message + (String(e.message).includes('401') ? ' (enter the API key above)' : '');
     }

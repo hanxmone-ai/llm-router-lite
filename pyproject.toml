@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-router-lite"
-version = "0.1.0"
+version = "0.2.0"
 description = "Self-hosted LLM gateway: one OpenAI-compatible API, routing across providers, retries, fallback, circuit breaking and token cost tracking."
 readme = "README.md"
 license = { text = "MIT" }

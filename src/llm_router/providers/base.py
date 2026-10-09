@@ -114,6 +114,10 @@ class Provider(ABC):
         first chunk when the upstream rejects the request, which lets the router fall back.
         """
 
+    async def embed(self, model: str, request: dict[str, Any]) -> ChatResult:
+        """OpenAI-style embeddings. Adapters without embeddings fall back to the next target."""
+        raise ProviderError(f"{self.name}: embeddings are not supported by this provider", ErrorKind.PROVIDER)
+
     async def aclose(self) -> None:
         await self._client.aclose()
 

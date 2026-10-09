@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import math
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -11,6 +13,25 @@ from typing import Any
 from ..errors import ErrorKind, ProviderError
 from .anthropic import _text_of
 from .base import ChatResult, Provider, Usage, completion_body, completion_chunk
+
+EMBEDDING_DIMENSIONS = 256
+
+
+def hashed_embedding(text: str, dimensions: int = EMBEDDING_DIMENSIONS) -> list[float]:
+    """Deterministic bag-of-character-n-grams vector: similar texts get similar vectors.
+
+    Not semantic, but enough to demo and test retrieval without any API key.
+    """
+    vector = [0.0] * dimensions
+    normalized = " ".join(text.lower().split())
+    for n in (1, 2, 3):
+        for i in range(len(normalized) - n + 1):
+            gram = normalized[i : i + n]
+            if gram.strip():
+                digest = hashlib.blake2b(gram.encode(), digest_size=4).digest()
+                vector[int.from_bytes(digest, "little") % dimensions] += 1.0
+    norm = math.sqrt(sum(v * v for v in vector)) or 1.0
+    return [round(v / norm, 6) for v in vector]
 
 
 def estimate_tokens(text: str) -> int:
@@ -49,3 +70,18 @@ class MockProvider(Provider):
             yield completion_chunk(chunk_id, model, created, {"content": word + (" " if i < len(words) - 1 else "")})
         yield completion_chunk(chunk_id, model, created, {}, finish_reason="stop")
         yield completion_chunk(chunk_id, model, created, usage=usage)
+
+    async def embed(self, model: str, request: dict[str, Any]) -> ChatResult:
+        self._check()
+        raw = request.get("input", "")
+        texts = [raw] if isinstance(raw, str) else [str(t) for t in raw]
+        usage = Usage(prompt_tokens=sum(estimate_tokens(t) for t in texts))
+        body = {
+            "object": "list",
+            "model": model,
+            "data": [
+                {"object": "embedding", "index": i, "embedding": hashed_embedding(t)} for i, t in enumerate(texts)
+            ],
+            "usage": {"prompt_tokens": usage.prompt_tokens, "total_tokens": usage.prompt_tokens},
+        }
+        return ChatResult(body=body, usage=usage)

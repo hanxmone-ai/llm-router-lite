@@ -82,7 +82,8 @@ class Price(_Strict):
 
 
 class ServerConfig(_Strict):
-    #: Keys clients must send as ``Authorization: Bearer <key>``. Empty = no auth (local use only).
+    #: Admin keys, sent as ``Authorization: Bearer <key>``: every route, every client's usage, /v1/status.
+    #: With no admin keys and no clients, auth is off (local use only).
     api_keys: list[str] = Field(default_factory=list)
     usage_db: str = "data/usage.db"
 
@@ -92,10 +93,23 @@ class ServerConfig(_Strict):
         return [k for k in keys if k]
 
 
+class ClientConfig(_Strict):
+    """One API key per customer or application, with optional limits."""
+
+    #: An empty key (environment variable not set) disables the client.
+    api_key: str
+    #: Routes (or ``provider/model`` targets) this client may call. Empty = all routes.
+    routes: list[str] = Field(default_factory=list)
+    #: Requests are refused with HTTP 429 once the month-to-date cost reaches this (needs ``prices``).
+    monthly_budget_usd: float | None = Field(None, gt=0)
+    requests_per_minute: int | None = Field(None, ge=1)
+
+
 class Config(_Strict):
     server: ServerConfig = Field(default_factory=ServerConfig)
     providers: dict[str, ProviderConfig]
     routes: dict[str, list[Target]]
+    clients: dict[str, ClientConfig] = Field(default_factory=dict)
     retry: RetryConfig = Field(default_factory=RetryConfig)
     circuit_breaker: BreakerConfig = Field(default_factory=BreakerConfig)
     prices: dict[str, Price] = Field(default_factory=dict)
@@ -110,6 +124,18 @@ class Config(_Strict):
             for target in targets:
                 if target.provider not in self.providers:
                     raise ValueError(f"route {name!r} uses unknown provider {target.provider!r}")
+        keys: dict[str, str] = {}
+        for name, client in self.clients.items():
+            if name == "admin":
+                raise ValueError("client name 'admin' is reserved")
+            for route in client.routes:
+                provider = route.partition("/")[0] if "/" in route else None
+                if route not in self.routes and provider not in self.providers:
+                    raise ValueError(f"client {name!r} allows unknown route {route!r}")
+            if client.api_key:
+                if client.api_key in keys or client.api_key in self.server.api_keys:
+                    raise ValueError(f"client {name!r} reuses an API key")
+                keys[client.api_key] = name
         return self
 
 

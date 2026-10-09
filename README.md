@@ -13,14 +13,15 @@ with its tokens and estimated cost.
 
 ## Features
 
-- **OpenAI-compatible API**: `POST /v1/chat/completions` (streaming and non-streaming) and `GET /v1/models`
+- **OpenAI-compatible API**: `POST /v1/chat/completions` (streaming and non-streaming), `POST /v1/embeddings` and `GET /v1/models`
 - **Providers**: Anthropic (translated to and from the Messages API), and any OpenAI-compatible endpoint: OpenAI, DeepSeek, Ollama, vLLM, LM Studio...
 - **Routes with fallback**: a route is an ordered list of `provider/model` targets
 - **Retries with exponential backoff and jitter** for timeouts, HTTP 429 and 5xx
 - **Circuit breaker** per target: after N consecutive failures the target is skipped until a cooldown passes
 - **Error classification**: rate limits retry, bad keys or unknown models fall back, and malformed requests are returned to the caller without being retried
 - **Streaming fallback**: the first chunk is read before the response starts, so a provider that fails up front is still retried or replaced
-- **Token and cost accounting**: input, output and cached tokens per request in SQLite; costs from a price table you control
+- **One key per client**: each customer or app gets its own API key, with optional route allowlist, requests-per-minute limit and monthly budget
+- **Token and cost accounting**: input, output and cached tokens per request and per client in SQLite; costs from a price table you control
 - **Dashboard** at `/dashboard`: totals, breaker state per target, per-model breakdown, recent requests, and a playground
 - **Runs with no API keys**: built-in `mock` providers (one always fails) show retries and fallback in action
 
@@ -88,6 +89,25 @@ prices:          # USD per 1M tokens; copy current numbers from each provider
 
 Clients can also bypass routing with `"model": "provider/model"`, for example `"deepseek/deepseek-chat"`.
 
+### Clients
+
+Give each customer or application its own key. Usage and cost are recorded per client, and
+limits are enforced before any provider is called:
+
+```yaml
+clients:
+  acme-support-bot:
+    api_key: ${ACME_KEY}
+    routes: [fast, embed]          # optional allowlist; omit for every route
+    requests_per_minute: 60        # optional → HTTP 429 + Retry-After
+    monthly_budget_usd: 30         # optional → HTTP 429 "budget_exceeded" (needs prices)
+```
+
+| Key | Can call | Sees |
+|---|---|---|
+| Admin (`server.api_keys`) | every route | all usage (`/v1/usage?client=` to filter), `/v1/status` |
+| Client | its allowed routes | only its own usage and budget |
+
 ## How a request is routed
 
 ```mermaid
@@ -125,9 +145,10 @@ with `tools` skip Anthropic targets and fall back to an OpenAI-compatible one.
 | Endpoint | Description |
 |---|---|
 | `POST /v1/chat/completions` | OpenAI chat completions, with `stream: true` support |
+| `POST /v1/embeddings` | OpenAI embeddings, routed the same way (Anthropic targets are skipped) |
 | `GET /v1/models` | The configured routes |
-| `GET /v1/usage?hours=24` | Totals, per-model breakdown and the 20 most recent requests |
-| `GET /v1/status` | Providers (enabled or not) and breaker state per target |
+| `GET /v1/usage?hours=24` | Totals, breakdown by model and by client, the 20 most recent requests |
+| `GET /v1/status` | Admin only: providers, breaker state per target, clients and their limits |
 | `GET /dashboard` | Web dashboard |
 | `GET /healthz` | Liveness check (no auth) |
 
@@ -135,7 +156,8 @@ with `tools` skip Anthropic targets and fall back to an OpenAI-compatible one.
 
 ```
 src/llm_router/
-  app.py            HTTP layer (Starlette): auth, validation, SSE
+  app.py            HTTP layer (Starlette): validation, limits, SSE
+  auth.py           admin and client keys, rate limiter, budget window
   router.py         route resolution, retries, fallback, streaming relay, accounting
   breaker.py        circuit breaker
   usage.py          SQLite usage store and cost calculation
@@ -161,7 +183,7 @@ CI runs the tests on Python 3.10 and 3.12, builds the Docker image and smoke-tes
 ## Limitations and next steps
 
 - One process: breaker state and the SQLite store are local. For several replicas, move them to Redis/Postgres.
-- No per-key rate limits or budgets yet.
+- Rate-limit counters live in memory and reset on restart; budgets are read from the usage database.
 - Tool calling is passed through only to OpenAI-compatible providers.
 
 ## License

@@ -12,8 +12,12 @@ DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
 class OpenAICompatProvider(Provider):
     @property
+    def _base(self) -> str:
+        return (self.config.base_url or DEFAULT_BASE_URL).rstrip("/")
+
+    @property
     def _url(self) -> str:
-        return (self.config.base_url or DEFAULT_BASE_URL).rstrip("/") + "/chat/completions"
+        return self._base + "/chat/completions"
 
     def _headers(self) -> dict[str, str]:
         headers = dict(self.config.headers)
@@ -32,3 +36,7 @@ class OpenAICompatProvider(Provider):
         payload = {**request, "model": model, "stream": True, "stream_options": {"include_usage": True}}
         async for chunk in self._stream_sse(self._url, payload, self._headers()):
             yield chunk
+
+    async def embed(self, model: str, request: dict[str, Any]) -> ChatResult:
+        body = await self._post_json(self._base + "/embeddings", {**request, "model": model}, self._headers())
+        return ChatResult(body=body, usage=Usage.from_openai(body.get("usage")))

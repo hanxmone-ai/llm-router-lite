@@ -13,7 +13,7 @@ from typing import Any
 from .breaker import CircuitBreaker
 from .config import Config, Target
 from .errors import AllTargetsFailed, ErrorKind, ProviderError, RouteNotFound
-from .providers.base import Provider, Usage
+from .providers.base import ChatResult, Provider, Usage
 from .usage import UsageRecord, UsageStore, compute_cost
 
 log = logging.getLogger("llm_router")
@@ -155,25 +155,35 @@ class Router:
 
     # ---- public API -----------------------------------------------------------------
 
-    async def complete(self, request: dict[str, Any]) -> RoutedResult:
+    async def complete(self, request: dict[str, Any], client: str | None = None) -> RoutedResult:
+        return await self._unary(request, client, "chat", lambda p, t: p.complete(t.model, request))
+
+    async def embed(self, request: dict[str, Any], client: str | None = None) -> RoutedResult:
+        """``POST /v1/embeddings``: same routing, retries and fallback as chat."""
+        return await self._unary(request, client, "embeddings", lambda p, t: p.embed(t.model, request))
+
+    async def _unary(
+        self,
+        request: dict[str, Any],
+        client: str | None,
+        endpoint: str,
+        call: Callable[[Provider, Target], Awaitable[ChatResult]],
+    ) -> RoutedResult:
         route, targets = self.resolve(request["model"])
         started = self._clock()
-
-        async def call(provider: Provider, target: Target):
-            return await provider.complete(target.model, request)
-
+        meta = {"client": client, "endpoint": endpoint, "stream": False}
         try:
             target, result, attempts = await self._try_targets(route, targets, call)
         except AllTargetsFailed as exc:
-            self._record(route, None, started, ok=False, stream=False, attempts=exc.attempts, error=str(exc))
+            self._record(route, None, started, ok=False, attempts=exc.attempts, error=str(exc), **meta)
             raise
         except ProviderError as exc:
-            self._record(route, None, started, ok=False, stream=False, attempts=[], error=str(exc))
+            self._record(route, None, started, ok=False, attempts=[], error=str(exc), **meta)
             raise
-        self._record(route, target, started, ok=True, stream=False, attempts=attempts, usage=result.usage)
+        self._record(route, target, started, ok=True, attempts=attempts, usage=result.usage, **meta)
         return RoutedResult(route=route, target=target, attempts=attempts, body=result.body, usage=result.usage)
 
-    async def open_stream(self, request: dict[str, Any]) -> RoutedStream:
+    async def open_stream(self, request: dict[str, Any], client: str | None = None) -> RoutedStream:
         """Starts a stream on the first healthy target.
 
         The first chunk is read before returning, so a target that fails up front is
@@ -182,6 +192,7 @@ class Router:
         """
         route, targets = self.resolve(request["model"])
         started = self._clock()
+        meta = {"client": client, "endpoint": "chat", "stream": True}
 
         async def call(provider: Provider, target: Target):
             chunks = provider.stream(target.model, request)
@@ -197,12 +208,12 @@ class Router:
         try:
             target, (chunks, first), attempts = await self._try_targets(route, targets, call)
         except AllTargetsFailed as exc:
-            self._record(route, None, started, ok=False, stream=True, attempts=exc.attempts, error=str(exc))
+            self._record(route, None, started, ok=False, attempts=exc.attempts, error=str(exc), **meta)
             raise
         except ProviderError as exc:
-            self._record(route, None, started, ok=False, stream=True, attempts=[], error=str(exc))
+            self._record(route, None, started, ok=False, attempts=[], error=str(exc), **meta)
             raise
-        relay = self._relay(route, target, attempts, started, chunks, first)
+        relay = self._relay(route, target, attempts, started, chunks, first, meta)
         return RoutedStream(route=route, target=target, attempts=attempts, chunks=relay)
 
     async def _relay(
@@ -213,6 +224,7 @@ class Router:
         started: float,
         chunks: AsyncIterator[dict[str, Any]],
         first: dict[str, Any] | None,
+        meta: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any]]:
         usage = Usage()
         error: str | None = "client disconnected"
@@ -231,9 +243,7 @@ class Router:
             yield {"error": {"message": f"upstream failed mid-stream: {exc}", "type": "upstream_error"}}
         finally:
             await chunks.aclose()
-            self._record(
-                route, target, started, ok=error is None, stream=True, attempts=attempts, usage=usage, error=error
-            )
+            self._record(route, target, started, ok=error is None, attempts=attempts, usage=usage, error=error, **meta)
 
     # ---- accounting -----------------------------------------------------------------
 
@@ -248,6 +258,8 @@ class Router:
         attempts: list[Attempt],
         usage: Usage | None = None,
         error: str | None = None,
+        client: str | None = None,
+        endpoint: str = "chat",
     ) -> None:
         usage = usage or Usage()
         price = self.config.prices.get(target.model) if target else None
@@ -267,6 +279,8 @@ class Router:
                     cached_tokens=usage.cached_tokens,
                     cost_usd=compute_cost(usage, price),
                     error=error,
+                    client=client,
+                    endpoint=endpoint,
                 )
             )
         except Exception:  # accounting must never break a response
