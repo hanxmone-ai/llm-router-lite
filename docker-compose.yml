@@ -1,0 +1,15 @@
+services:
+  router:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file: .env
+    volumes:
+      - ./config.example.yaml:/app/config.yaml:ro   # point this at your own config
+      - usage:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"         # reach Ollama running on the host
+    restart: unless-stopped
+
+volumes:
+  usage:

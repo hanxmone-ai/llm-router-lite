@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llm-router-lite</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --panel: #ffffff; --ink: #14181f; --muted: #667085; --line: #e4e7ec;
+    --accent: #3b5bdb; --accent-ink: #ffffff; --ok: #12805c; --warn: #b54708; --bad: #c01048;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0d1117; --panel: #161b22; --ink: #e6edf3; --muted: #8b949e; --line: #2a313c;
+            --accent: #7c9cff; --accent-ink: #0d1117; --ok: #3fb950; --warn: #d29922; --bad: #f85149; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+           padding: 16px 20px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 16px; margin: 0; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  main { max-width: 1180px; margin: 0 auto; padding: 20px; display: grid; gap: 16px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+  .card, section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  .card { padding: 14px 16px; }
+  .card .label { color: var(--muted); font-size: 12px; }
+  .card .value { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  section { padding: 16px; overflow: hidden; }
+  section h2 { font-size: 14px; margin: 0 0 12px; }
+  .grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+  @media (max-width: 860px) { .grid2 { grid-template-columns: minmax(0, 1fr); } }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td.num, th.num { text-align: right; }
+  .mono { font-family: var(--mono); font-size: 12.5px; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; border: 1px solid currentColor; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); } .muted { color: var(--muted); }
+  .route { padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .route:last-child { border-bottom: 0; }
+  .route b { font-family: var(--mono); }
+  .targets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; align-items: center; }
+  .arrow { color: var(--muted); }
+  input, select, textarea, button { font: inherit; color: inherit; }
+  input, select, textarea { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  textarea { width: 100%; min-height: 72px; resize: vertical; }
+  button { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px; padding: 8px 14px;
+           font-weight: 600; cursor: pointer; min-height: 36px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+  pre.out { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 8px 0 0;
+            min-height: 60px; white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 13px; }
+  .err { color: var(--bad); font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>llm-router-lite</h1>
+    <div class="sub">Routing, fallback and token spend across LLM providers</div>
+  </div>
+  <div class="row" style="margin:0">
+    <label class="muted" for="key">API key</label>
+    <input id="key" type="password" placeholder="only if the server requires one" autocomplete="off" size="26">
+    <select id="hours" aria-label="Time window">
+      <option value="1">Last hour</option><option value="24" selected>Last 24 h</option><option value="168">Last 7 days</option>
+    </select>
+  </div>
+</header>
+<main>
+  <div id="error" class="err"></div>
+  <div class="cards">
+    <div class="card"><div class="label">Requests</div><div class="value" id="c-requests">–</div></div>
+    <div class="card"><div class="label">Failed</div><div class="value" id="c-failures">–</div></div>
+    <div class="card"><div class="label">Prompt tokens (cached)</div><div class="value" id="c-prompt">–</div></div>
+    <div class="card"><div class="label">Completion tokens</div><div class="value" id="c-completion">–</div></div>
+    <div class="card"><div class="label">Estimated cost</div><div class="value" id="c-cost">–</div></div>
+  </div>
+
+  <div class="grid2">
+    <section>
+      <h2>Routes · fallback order</h2>
+      <div id="routes" class="muted">Loading…</div>
+    </section>
+    <section>
+      <h2>Try a route</h2>
+      <div class="row" style="margin-top:0">
+        <select id="route" aria-label="Route"></select>
+        <label><input type="checkbox" id="stream" checked> stream</label>
+        <button id="send">Send</button>
+      </div>
+      <textarea id="prompt" style="margin-top:8px" aria-label="Prompt">Say hello in five words.</textarea>
+      <div class="muted" id="served"></div>
+      <pre class="out" id="answer"></pre>
+    </section>
+  </div>
+
+  <section>
+    <h2>By model</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Provider / model</th><th class="num">Requests</th><th class="num">Failed</th>
+        <th class="num">Prompt</th><th class="num">Cached</th><th class="num">Completion</th>
+        <th class="num">Avg latency</th><th class="num">Cost (USD)</th></tr></thead>
+      <tbody id="by-model"></tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <h2>Recent requests</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Time</th><th>Route</th><th>Served by</th><th>Result</th><th class="num">Attempts</th>
+        <th class="num">Tokens in / out</th><th class="num">Latency</th></tr></thead>
+      <tbody id="recent"></tbody>
+    </table></div>
+  </section>
+</main>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const fmt = new Intl.NumberFormat();
+  const store = {
+    get() { try { return localStorage.getItem('llm-router-key') || ''; } catch (e) { return ''; } },
+    set(v) { try { localStorage.setItem('llm-router-key', v); } catch (e) { /* storage unavailable */ } },
+  };
+  $('key').value = store.get();
+  $('key').addEventListener('change', () => { store.set($('key').value); refresh(); });
+  $('hours').addEventListener('change', refresh);
+
+  function headers(extra) {
+    const h = Object.assign({}, extra || {});
+    if ($('key').value) h['Authorization'] = 'Bearer ' + $('key').value;
+    return h;
+  }
+  async function api(path) {
+    const res = await fetch(path, { headers: headers() });
+    if (!res.ok) throw new Error(path + ' → HTTP ' + res.status);
+    return res.json();
+  }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+  function stateClass(s) { return s === 'closed' ? 'ok' : s === 'half_open' ? 'warn' : 'bad'; }
+
+  let routesLoaded = false;
+  async function refresh() {
+    try {
+      const [status, usage] = await Promise.all([api('/v1/status'), api('/v1/usage?hours=' + $('hours').value)]);
+      $('error').textContent = '';
+      $('c-requests').textContent = fmt.format(usage.requests);
+      $('c-failures').textContent = fmt.format(usage.failures);
+      $('c-prompt').textContent = fmt.format(usage.prompt_tokens) + ' (' + fmt.format(usage.cached_tokens) + ')';
+      $('c-completion').textContent = fmt.format(usage.completion_tokens);
+      $('c-cost').textContent = '$' + usage.cost_usd.toFixed(4);
+
+      $('routes').innerHTML = Object.entries(status.routes).map(([name, targets]) => {
+        const chain = targets.map((t) => {
+          const provider = status.providers[t.target.split('/')[0]] || {};
+          const cls = provider.enabled === false ? 'muted' : stateClass(t.state);
+          const label = provider.enabled === false ? 'disabled' : t.state.replace('_', '-');
+          return '<span class="pill ' + cls + '" title="' + esc(provider.disabled_reason || '') + '">' +
+                 '<span class="mono">' + esc(t.target) + '</span> · ' + label + '</span>';
+        }).join('<span class="arrow">→</span>');
+        return '<div class="route"><b>' + esc(name) + '</b><div class="targets">' + chain + '</div></div>';
+      }).join('');
+
+      if (!routesLoaded) {
+        $('route').innerHTML = Object.keys(status.routes).map((r) => '<option>' + esc(r) + '</option>').join('');
+        if (status.routes.demo) $('route').value = 'demo';
+        routesLoaded = true;
+      }
+
+      $('by-model').innerHTML = usage.by_model.map((r) =>
+        '<tr><td class="mono">' + esc(r.provider + '/' + r.model) + '</td><td class="num">' + fmt.format(r.requests) +
+        '</td><td class="num">' + fmt.format(r.failures) + '</td><td class="num">' + fmt.format(r.prompt_tokens) +
+        '</td><td class="num">' + fmt.format(r.cached_tokens) + '</td><td class="num">' + fmt.format(r.completion_tokens) +
+        '</td><td class="num">' + fmt.format(r.avg_latency_ms) + ' ms</td><td class="num">' + r.cost_usd.toFixed(4) + '</td></tr>'
+      ).join('') || '<tr><td colspan="8" class="muted">No requests yet</td></tr>';
+
+      $('recent').innerHTML = usage.recent.map((r) =>
+        '<tr><td>' + new Date(r.ts * 1000).toLocaleTimeString() + '</td><td class="mono">' + esc(r.route) +
+        '</td><td class="mono">' + esc(r.provider ? r.provider + '/' + r.model : '—') +
+        '</td><td>' + (r.ok ? '<span class="ok">ok</span>' : '<span class="bad" title="' + esc(r.error) + '">failed</span>') +
+        (r.stream ? ' <span class="muted">stream</span>' : '') +
+        '</td><td class="num">' + r.attempts + '</td><td class="num">' + fmt.format(r.prompt_tokens) + ' / ' +
+        fmt.format(r.completion_tokens) + '</td><td class="num">' + fmt.format(r.latency_ms) + ' ms</td></tr>'
+      ).join('') || '<tr><td colspan="7" class="muted">No requests yet</td></tr>';
+    } catch (e) {
+      $('error').textContent = e.message + (String(e.message).includes('401') ? ' (enter the API key above)' : '');
+    }
+  }
+
+  $('send').addEventListener('click', async () => {
+    const stream = $('stream').checked;
+    $('answer').textContent = '';
+    $('served').textContent = 'Sending…';
+    try {
+      const res = await fetch('/v1/chat/completions', {
+        method: 'POST',
+        headers: headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ model: $('route').value, stream, messages: [{ role: 'user', content: $('prompt').value }] }),
+      });
+      const target = res.headers.get('x-router-target');
+      $('served').textContent = target
+        ? 'Served by ' + target + ' after ' + res.headers.get('x-router-attempts') + ' attempt(s)'
+        : 'HTTP ' + res.status;
+      if (!res.ok) { $('answer').textContent = JSON.stringify(await res.json(), null, 2); return; }
+      if (!stream) {
+        const data = await res.json();
+        $('answer').textContent = data.choices[0].message.content;
+      } else {
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const events = buffer.split('\n\n');
+          buffer = events.pop();
+          for (const ev of events) {
+            const data = ev.replace(/^data:\s*/, '');
+            if (!data || data === '[DONE]') continue;
+            const chunk = JSON.parse(data);
+            if (chunk.error) { $('answer').textContent += '\n[' + chunk.error.message + ']'; continue; }
+            const delta = chunk.choices && chunk.choices[0] && chunk.choices[0].delta;
+            if (delta && delta.content) $('answer').textContent += delta.content;
+          }
+        }
+      }
+    } catch (e) {
+      $('served').textContent = e.message;
+    }
+    refresh();
+  });
+
+  refresh();
+  setInterval(refresh, 5000);
+})();
+</script>
+</body>
+</html>

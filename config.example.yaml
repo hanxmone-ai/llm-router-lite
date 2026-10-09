@@ -1,0 +1,65 @@
+# llm-router-lite configuration.
+# ${VAR} reads an environment variable; ${VAR:-default} adds a fallback.
+# A provider whose api_key resolves to an empty string is shown as disabled and skipped.
+
+server:
+  # Clients send "Authorization: Bearer <key>". Leave ROUTER_API_KEY unset only for local testing.
+  api_keys: ["${ROUTER_API_KEY}"]
+  usage_db: ${USAGE_DB:-data/usage.db}
+
+providers:
+  anthropic:
+    type: anthropic
+    api_key: ${ANTHROPIC_API_KEY}
+  openai:
+    type: openai                     # any OpenAI-compatible endpoint
+    base_url: https://api.openai.com/v1
+    api_key: ${OPENAI_API_KEY}
+  deepseek:
+    type: openai
+    base_url: https://api.deepseek.com/v1
+    api_key: ${DEEPSEEK_API_KEY}
+  ollama:
+    type: openai
+    base_url: ${OLLAMA_BASE_URL:-http://localhost:11434/v1}
+    timeout: 120
+  # Offline providers so the gateway and dashboard work without any API key.
+  mock-down:
+    type: mock
+    mode: fail                       # always HTTP 503: shows retries, fallback and the circuit breaker
+  mock:
+    type: mock
+
+# A route is a model name clients can request. Targets are tried in order.
+# Clients can also skip routing with "provider/model", e.g. "deepseek/deepseek-chat".
+routes:
+  smart:
+    - { provider: anthropic, model: claude-sonnet-5-5 }
+    - { provider: openai, model: gpt-4.1 }
+  fast:
+    - { provider: deepseek, model: deepseek-chat }
+    - { provider: openai, model: gpt-4.1-mini }
+    - { provider: ollama, model: qwen2.5:7b }
+  local:
+    - { provider: ollama, model: qwen2.5:7b }
+  demo:
+    - { provider: mock-down, model: unstable }
+    - { provider: mock, model: echo }
+
+retry:
+  max_attempts: 2          # per target, before falling back
+  base_delay: 0.5          # seconds; doubles each retry, with jitter
+  max_delay: 8
+
+circuit_breaker:
+  failure_threshold: 3     # consecutive failures before a target is skipped
+  cooldown_seconds: 30
+
+# USD per 1M tokens, used for the cost estimate on the dashboard.
+# The numbers below are placeholders: copy current prices from each provider's pricing page.
+prices:
+  claude-sonnet-5-5: { input: 3.00, output: 15.00, cached_input: 0.30 }
+  gpt-4.1: { input: 2.00, output: 8.00, cached_input: 0.50 }
+  gpt-4.1-mini: { input: 0.40, output: 1.60, cached_input: 0.10 }
+  deepseek-chat: { input: 0.27, output: 1.10, cached_input: 0.07 }
+  echo: { input: 1.00, output: 2.00 }

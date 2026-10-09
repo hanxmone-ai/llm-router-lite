@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-router-lite"
+version = "0.1.0"
+description = "Self-hosted LLM gateway: one OpenAI-compatible API, routing across providers, retries, fallback, circuit breaking and token cost tracking."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Yihan Qiu" }]
+requires-python = ">=3.10"
+dependencies = [
+    "starlette>=0.37",
+    "httpx>=0.27",
+    "pydantic>=2.6",
+    "pyyaml>=6.0",
+    "uvicorn[standard]>=0.29",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "anyio>=4", "ruff>=0.5"]
+
+[project.scripts]
+llm-router = "llm_router.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+llm_router = ["static/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
