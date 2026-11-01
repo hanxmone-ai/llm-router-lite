@@ -189,3 +189,7 @@ CI runs the tests on Python 3.10 and 3.12, builds the Docker image and smoke-tes
 ## License
 
 [MIT](LICENSE) © 2026 Yihan Qiu
+
+---
+
+Built by [Han (Yihan Qiu)](https://hanxmone-ai.github.io/) · AI full-stack engineer · [GitHub](https://github.com/hanxmone-ai) · [Portfolio](https://hanxmone-ai.github.io/)
